@@ -29,6 +29,8 @@ It simulates 2D particle motion with:
 Make sure you have Rust and Bevy setup, then run:
 
 ```bash
+git clone https://github.com/XXNOUR/Entropic
+git checkout Light-rust
 cd entropic_rust
 cargo run
 ```
