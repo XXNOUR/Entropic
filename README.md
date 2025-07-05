@@ -206,7 +206,9 @@ Run:
 ./my-sim
 ```
 
-You should see a window with a green circle.
+You should see a window with a green circle like this
+
+![green_ball](Assets/greenball.png)
 
 ---
 
