@@ -289,3 +289,5 @@ Here’s why:
 * This matches the real-world idea that each particle is a separate, self-contained thing.
 
 You could write everything in a procedural style too, but OOP keeps the code organized and scalable as the project grows.
+
+[Here is a quick guide about working with OOP in C++](Docs/OOP_C++_Crashcourse.md)
