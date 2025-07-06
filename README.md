@@ -13,6 +13,11 @@ It simulates 2D particle motion with:
 * Simple collision against world boundaries
 * Real-time rendering using the Bevy engine.
 
+## 🎥 Demo
+
+<video src="/assets/exp_commit_5.mp4" width="320" height="240" controls></video>
+
+
 ---
 
 ## 🧱 **Current Features**
