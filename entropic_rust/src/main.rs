@@ -1,17 +1,20 @@
 use bevy::{
-    color::palettes::css::RED,
-    ecs::{entity::unique_vec, query::WorldQuery},
+    color::palettes::css::GOLD,
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin, update_frame_count},
     math::Vec2,
     prelude::*,
+    render::batching::gpu_preprocessing::GpuOcclusionCullingWorkItemBuffers,
 };
 use rand::Rng;
 
 // LEVEL 1: Component Definitions
 #[derive(Component, Default)]
 struct Position(Vec2);
-
 #[derive(Component, Default)]
 struct Velocity(Vec2);
+
+#[derive(Resource)]
+struct BallCount(pub usize);
 
 #[derive(Component, Default)]
 #[require(
@@ -22,7 +25,10 @@ struct Particle {
     radius: f32,
     mass: f32,
 }
-
+#[derive(Component)]
+struct FpsText;
+#[derive(Component)]
+struct BallText;
 // TODO: Add a component for collision events if you want to use the enum approach
 // #[derive(Event)]
 // struct CollisionEvent {
@@ -50,11 +56,12 @@ fn startup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
     // Spawn Camera
     commands.spawn(Camera2d);
 
-    let shape = meshes.add(Circle::new(20.0));
+    let shape = meshes.add(Circle::new(7.0));
     let black = Color::srgb(0.0, 0.0, 0.0);
     let green = Color::srgb(0.0, 1.0, 0.0);
 
@@ -64,7 +71,7 @@ fn startup(
     let wall_thickness = 10.0;
     let half_width = box_width / 2.0;
     let half_height = box_height / 2.0;
-
+    let my_font = asset_server.load("fonts/TerminessNerdFont-Bold.ttf");
     // Draw walls (keeping this the same)
     commands.spawn((
         Sprite {
@@ -111,18 +118,78 @@ fn startup(
         Velocity(Vec2::new(100.0, 0.0)),      // Fixed: Give it some initial velocity
         Particle {
             mass: 20.,
-            radius: 20.,
+            radius: 7.,
         },
     ));
-}
+    commands
+        .spawn((
+            // Create a Text with multiple child spans.
+            Text::new("FPS: "),
+            TextFont {
+                // This font is loaded and will be used instead of the default font.
+                font: asset_server.load("fonts/TerminessNerdFont-Bold.ttf"),
+                font_size: 42.0,
+                ..default()
+            },
+        ))
+        .with_child((
+            TextSpan::default(),
+            if cfg!(feature = "default_font") {
+                (
+                    TextFont {
+                        font_size: 33.0,
+                        // If no font is specified, the default font (a minimal subset of FiraMono) will be used.
+                        ..default()
+                    },
+                    TextColor(GOLD.into()),
+                )
+            } else {
+                (
+                    // "default_font" feature is unavailable, load a font to use instead.
+                    TextFont {
+                        font: asset_server.load("fonts/TerminessNerdFont-Bold.ttf"),
+                        font_size: 33.0,
+                        ..Default::default()
+                    },
+                    TextColor(GOLD.into()),
+                )
+            },
+            FpsText,
+        ));
+    let text_entity = commands
+        .spawn((
+            Text::new("Count: "),
+            TextFont {
+                font: my_font.clone(),
+                font_size: 42.0,
+                ..default()
+            },
+            TextColor(Color::srgb(1.0, 1.0, 1.0)),
+        ))
+        .with_child((
+            TextSpan::default(),
+            TextFont {
+                font: asset_server.load("fonts/TerminessNerdFont-Bold.ttf"),
+                font_size: 42.0,
+                ..default()
+            },
+            TextColor(GOLD.into()),
+            BallText,
+        ))
+        .id();
 
-fn normalize(vec: Vec2) -> Vec2 {
-    let length = vec.length();
-    if length == 0.0 {
-        Vec2::ZERO
-    } else {
-        vec / length
-    }
+    // Then add the text to the node
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(100.0),
+                right: Val::Px(50.0),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+        ))
+        .add_child(text_entity);
 }
 
 // LEVEL 3: Split into separate systems
@@ -134,7 +201,7 @@ fn physics_system(mut query: Query<(&mut Position, &Velocity)>, time: Res<Time>)
 }
 
 fn gravity_system(mut query: Query<&mut Velocity, With<Particle>>, time: Res<Time>) {
-    const GRAVITY: f32 = 400.0;
+    const GRAVITY: f32 = 200.0;
 
     // Apply gravity to all particles
     let down = Vec2::new(0.0, -1.0);
@@ -184,8 +251,12 @@ fn wall_collision_system(mut query: Query<(&mut Position, &mut Velocity, &Partic
 // LEVEL 4: Particle collision system
 fn particle_collision_system(mut query: Query<(&mut Position, &mut Velocity, &Particle)>) {
     let mut combinations = query.iter_combinations_mut();
-    while let Some([(mut pos_a, mut vel_a, part_a), (mut pos_b, mut vel_b, part_b)]) =
-        combinations.fetch_next()
+    while let Some(
+        [
+            (mut pos_a, mut vel_a, part_a),
+            (mut pos_b, mut vel_b, part_b),
+        ],
+    ) = combinations.fetch_next()
     {
         // Calculate distance between particles
         let distance_vec = pos_a.0 - pos_b.0;
@@ -241,17 +312,21 @@ fn spawn_at_mouse_click(
     windows: Query<&Window>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut count: ResMut<BallCount>,
 ) {
     if mouse_button.just_pressed(MouseButton::Left) {
-        if let Ok(window) = windows.get_single() {
+        if let Ok(window) = windows.single() {
             if let Some(cursor_pos) = window.cursor_position() {
                 // Convert cursor position to world coordinates
                 let world_x = cursor_pos.x - (window.width() / 2.0);
                 let world_y = (window.height() / 2.0) - cursor_pos.y;
 
-                let shape = meshes.add(Circle::new(20.0));
+                let shape = meshes.add(Circle::new(7.0));
                 let random_c = RandomColor::new();
                 let color = Color::srgb(random_c.r, random_c.g, random_c.b);
+
+                count.0 += 1;
+                info_once!("{}", count.0);
 
                 // LEVEL 2: Spawn with proper component structure
                 commands.spawn((
@@ -264,11 +339,32 @@ fn spawn_at_mouse_click(
                         rand::rng().random_range(-100.0..300.0),
                     )),
                     Particle {
-                        radius: 20.0,
+                        radius: 7.0,
                         mass: 20.0,
                     },
                 ));
             }
+        }
+    }
+}
+fn text_update_system(
+    diagnostics: Res<DiagnosticsStore>,
+    mut query: Query<&mut TextSpan, With<FpsText>>,
+) {
+    for mut span in &mut query {
+        if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
+            if let Some(value) = fps.smoothed() {
+                // Update the value of the second section
+                **span = format!("{value:.2}");
+                info_once!("{}", **span);
+            }
+        }
+    }
+}
+fn ball_count_update(count: Res<BallCount>, mut ball: Query<&mut TextSpan, With<BallText>>) {
+    if count.is_changed() {
+        for mut span in &mut ball {
+            **span = format!("{}", count.0);
         }
     }
 }
@@ -277,7 +373,9 @@ fn main() {
     let mut app = App::new();
 
     app.add_plugins(DefaultPlugins);
+    app.add_plugins(FrameTimeDiagnosticsPlugin::default());
     app.add_systems(Startup, startup);
+    app.insert_resource(BallCount(1));
 
     // Add systems in the correct order for physics simulation
     app.add_systems(
@@ -288,11 +386,12 @@ fn main() {
             wall_collision_system,
             particle_collision_system,
             sync_transform_system,
+            text_update_system,
         )
             .chain(),
     ); // .chain() ensures they run in order
 
-    app.add_systems(Update, spawn_at_mouse_click);
+    app.add_systems(Update, (spawn_at_mouse_click, ball_count_update).chain());
 
     app.run();
 }
