@@ -1,87 +1,40 @@
 use bevy::{
     color::palettes::css::GOLD,
-    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin, update_frame_count},
     math::Vec2,
     prelude::*,
-    render::mesh::PrimitiveTopology,
+    render::batching::gpu_preprocessing::GpuOcclusionCullingWorkItemBuffers,
 };
 use rand::Rng;
 
 // LEVEL 1: Component Definitions
 #[derive(Component, Default)]
 struct Position(Vec2);
-
 #[derive(Component, Default)]
 struct Velocity(Vec2);
 
 #[derive(Resource)]
 struct BallCount(pub usize);
 
-// New component to store collision information for visualization
-#[derive(Component)]
-struct CollisionVisualization {
-    normal: Vec2,
-    position: Vec2,
-    timer: f32,
-    impulse_magnitude: f32,
-}
-
-// Debug settings resource
-#[derive(Resource)]
-struct DebugSettings {
-    show_collision_normals: bool,
-    show_velocity_vectors: bool,
-    show_particle_info: bool,
-    collision_normal_length: f32,
-    velocity_scale: f32,
-}
-
-impl Default for DebugSettings {
-    fn default() -> Self {
-        Self {
-            show_collision_normals: true,
-            show_velocity_vectors: true,
-            show_particle_info: false,
-            collision_normal_length: 50.0,
-            velocity_scale: 0.2,
-        }
-    }
-}
-
 #[derive(Component, Default)]
 #[require(
     Position,
     Velocity = Velocity(Vec2::new(-1., 1.)),
-)]
+    )]
 struct Particle {
     radius: f32,
     mass: f32,
-    id: u32, // Add ID for debugging
 }
-
 #[derive(Component)]
 struct FpsText;
-
 #[derive(Component)]
 struct BallText;
-
-#[derive(Component)]
-struct DebugText;
-
-// Component for debug lines (collision normals, velocity vectors)
-#[derive(Component)]
-struct DebugLine {
-    start: Vec2,
-    end: Vec2,
-    color: Color,
-    line_type: DebugLineType,
-}
-
-#[derive(PartialEq)]
-enum DebugLineType {
-    CollisionNormal,
-    VelocityVector,
-}
+// TODO: Add a component for collision events if you want to use the enum approach
+// #[derive(Event)]
+// struct CollisionEvent {
+//     entity: Entity,
+//     collision_type: CollisionType,
+// }
 
 struct RandomColor {
     r: f32,
@@ -119,8 +72,7 @@ fn startup(
     let half_width = box_width / 2.0;
     let half_height = box_height / 2.0;
     let my_font = asset_server.load("fonts/TerminessNerdFont-Bold.ttf");
-
-    // Draw walls
+    // Draw walls (keeping this the same)
     commands.spawn((
         Sprite {
             color: green,
@@ -157,25 +109,24 @@ fn startup(
         Transform::from_xyz(half_width, 0.0, 0.0),
     ));
 
-    // Spawn initial particle with unique ID
+    // LEVEL 2: Update this spawn to use the new component structure
     commands.spawn((
         Mesh2d(shape),
         MeshMaterial2d(materials.add(black)),
-        Transform::from_xyz(0.0, 200.0, 0.0),
-        Position(Vec2::new(0.0, 200.0)),
-        Velocity(Vec2::new(100.0, 0.0)),
+        Transform::from_xyz(0.0, 200.0, 0.0), // Keep this for rendering
+        Position(Vec2::new(0.0, 200.0)),      // Fixed: Match the transform position
+        Velocity(Vec2::new(100.0, 0.0)),      // Fixed: Give it some initial velocity
         Particle {
             mass: 20.,
             radius: 7.,
-            id: 0,
         },
     ));
-
-    // FPS Text
     commands
         .spawn((
+            // Create a Text with multiple child spans.
             Text::new("FPS: "),
             TextFont {
+                // This font is loaded and will be used instead of the default font.
                 font: asset_server.load("fonts/TerminessNerdFont-Bold.ttf"),
                 font_size: 42.0,
                 ..default()
@@ -183,16 +134,28 @@ fn startup(
         ))
         .with_child((
             TextSpan::default(),
-            TextFont {
-                font: asset_server.load("fonts/TerminessNerdFont-Bold.ttf"),
-                font_size: 33.0,
-                ..default()
+            if cfg!(feature = "default_font") {
+                (
+                    TextFont {
+                        font_size: 33.0,
+                        // If no font is specified, the default font (a minimal subset of FiraMono) will be used.
+                        ..default()
+                    },
+                    TextColor(GOLD.into()),
+                )
+            } else {
+                (
+                    // "default_font" feature is unavailable, load a font to use instead.
+                    TextFont {
+                        font: asset_server.load("fonts/TerminessNerdFont-Bold.ttf"),
+                        font_size: 33.0,
+                        ..Default::default()
+                    },
+                    TextColor(GOLD.into()),
+                )
             },
-            TextColor(GOLD.into()),
             FpsText,
         ));
-
-    // Ball Count Text
     let text_entity = commands
         .spawn((
             Text::new("Count: "),
@@ -215,6 +178,7 @@ fn startup(
         ))
         .id();
 
+    // Then add the text to the node
     commands
         .spawn((
             Node {
@@ -226,89 +190,20 @@ fn startup(
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
         ))
         .add_child(text_entity);
-
-    // Debug controls text
-    commands.spawn((
-        Text::new("Debug Controls:\n[N] Toggle Collision Normals\n[V] Toggle Velocity Vectors\n[I] Toggle Particle Info\n[SPACE] Pause Physics"),
-        TextFont {
-            font: my_font.clone(),
-            font_size: 16.0,
-            ..default()
-        },
-        TextColor(Color::srgb(0.8, 0.8, 0.8)),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(10.0),
-            left: Val::Px(10.0),
-            ..default()
-        },
-        DebugText,
-    ));
-}
-
-// Physics pause resource
-#[derive(Resource)]
-struct PhysicsPaused(bool);
-
-impl Default for PhysicsPaused {
-    fn default() -> Self {
-        Self(false)
-    }
-}
-
-// Handle debug input
-fn debug_input_system(
-    mut debug_settings: ResMut<DebugSettings>,
-    mut physics_paused: ResMut<PhysicsPaused>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-) {
-    if keyboard.just_pressed(KeyCode::KeyN) {
-        debug_settings.show_collision_normals = !debug_settings.show_collision_normals;
-        info!(
-            "Collision normals: {}",
-            debug_settings.show_collision_normals
-        );
-    }
-    if keyboard.just_pressed(KeyCode::KeyV) {
-        debug_settings.show_velocity_vectors = !debug_settings.show_velocity_vectors;
-        info!("Velocity vectors: {}", debug_settings.show_velocity_vectors);
-    }
-    if keyboard.just_pressed(KeyCode::KeyI) {
-        debug_settings.show_particle_info = !debug_settings.show_particle_info;
-        info!("Particle info: {}", debug_settings.show_particle_info);
-    }
-    if keyboard.just_pressed(KeyCode::Space) {
-        physics_paused.0 = !physics_paused.0;
-        info!("Physics paused: {}", physics_paused.0);
-    }
 }
 
 // LEVEL 3: Split into separate systems
-fn physics_system(
-    mut query: Query<(&mut Position, &Velocity)>,
-    time: Res<Time>,
-    physics_paused: Res<PhysicsPaused>,
-) {
-    if physics_paused.0 {
-        return;
-    }
-
+fn physics_system(mut query: Query<(&mut Position, &Velocity)>, time: Res<Time>) {
     // Update Position based on Velocity and delta time
     for (mut pos, velo) in &mut query {
         pos.0 += velo.0 * time.delta_secs();
     }
 }
 
-fn gravity_system(
-    mut query: Query<&mut Velocity, With<Particle>>,
-    time: Res<Time>,
-    physics_paused: Res<PhysicsPaused>,
-) {
-    if physics_paused.0 {
-        return;
-    }
+fn gravity_system(mut query: Query<&mut Velocity, With<Particle>>, time: Res<Time>) {
+    const GRAVITY: f32 = 900.0;
 
-    const GRAVITY: f32 = 70.0;
+    // Apply gravity to all particles
     let down = Vec2::new(0.0, -1.0);
 
     for mut velo in &mut query {
@@ -316,16 +211,10 @@ fn gravity_system(
     }
 }
 
-fn wall_collision_system(
-    mut query: Query<(&mut Position, &mut Velocity, &Particle)>,
-    physics_paused: Res<PhysicsPaused>,
-) {
-    if physics_paused.0 {
-        return;
-    }
-
+fn wall_collision_system(mut query: Query<(&mut Position, &mut Velocity, &Particle)>) {
     const COLLISION_DAMPING: f32 = 1.0;
     const MIN_VELOCITY: f32 = 5.0;
+    // Box collision boundaries (accounting for ball radius)
     const LEFT_BOUNDARY: f32 = -380.0;
     const RIGHT_BOUNDARY: f32 = 380.0;
     const BOTTOM_BOUNDARY: f32 = -280.0;
@@ -359,53 +248,47 @@ fn wall_collision_system(
     }
 }
 
-// Enhanced particle collision system with visualization
-fn particle_collision_system(
-    mut commands: Commands,
-    mut query: Query<(Entity, &mut Position, &mut Velocity, &Particle)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    debug_settings: Res<DebugSettings>,
-    physics_paused: Res<PhysicsPaused>,
-) {
-    if physics_paused.0 {
-        return;
-    }
-
-    // Clear old debug lines
-    let mut debug_lines = Vec::new();
-
+// LEVEL 4: Particle collision system
+fn particle_collision_system(mut query: Query<(&mut Position, &mut Velocity, &Particle)>) {
     let mut combinations = query.iter_combinations_mut();
     while let Some(
         [
-            (entity_a, mut pos_a, mut vel_a, part_a),
-            (entity_b, mut pos_b, mut vel_b, part_b),
+            (mut pos_a, mut vel_a, part_a),
+            (mut pos_b, mut vel_b, part_b),
         ],
     ) = combinations.fetch_next()
     {
         // Calculate distance between particles
         let distance_vec = pos_a.0 - pos_b.0;
+        info_once!(" DISTANCEVEC {:?}", distance_vec);
         let distance = distance_vec.length();
+
+        info_once!(" DIATNSE NON VEC{:?}", distance);
 
         // Check if collision occurs
         let min_distance = part_a.radius + part_b.radius;
 
+        info_once!(" MIN DISTANCE {:?}", min_distance);
+
         if distance < min_distance && distance > 0.0 {
             // Normalize the distance vector to get the collision normal
             let collision_normal = distance_vec / distance;
-
-            // Calculate collision point (midpoint between particles)
-            let collision_point = (pos_a.0 + pos_b.0) / 2.0;
+            info_once!(" COLLION NORMAL  => {:?}", collision_normal);
 
             // Separate the particles
             let overlap = min_distance - distance;
+
+            info_once!(" OVERLAPE {:?}", overlap);
             let separation = collision_normal * (overlap / 2.0);
 
+            info_once!("SEPERATION {:?}", separation);
             pos_a.0 += separation;
             pos_b.0 -= separation;
 
             // Calculate relative velocity
             let relative_velocity = vel_a.0 - vel_b.0;
+
+            // Calculate collision speed along the normal
             let collision_speed = relative_velocity.dot(collision_normal);
 
             // Only resolve if objects are moving toward each other
@@ -413,137 +296,21 @@ fn particle_collision_system(
                 continue;
             }
 
-            // Calculate impulse magnitude
-            let restitution = 0.8;
+            // Calculate impulse magnitude (simple approach)
+            let restitution = 0.8; // Bounciness factor
             let impulse_magnitude = (1.0 + restitution) * collision_speed.abs() / 2.0;
 
             // Apply impulse to velocities
             let impulse = collision_normal * impulse_magnitude;
             vel_a.0 += impulse;
             vel_b.0 -= impulse;
-
-            // Create visualization for collision normal
-            if debug_settings.show_collision_normals {
-                let normal_end =
-                    collision_point + collision_normal * debug_settings.collision_normal_length;
-
-                // Create a visual line for the collision normal
-                debug_lines.push(DebugLine {
-                    start: collision_point,
-                    end: normal_end,
-                    color: Color::srgb(1.0, 0.0, 0.0), // Red for collision normal
-                    line_type: DebugLineType::CollisionNormal,
-                });
-
-                // Add a small circle at collision point
-                let collision_marker = meshes.add(Circle::new(3.0));
-                commands.spawn((
-                    Mesh2d(collision_marker),
-                    MeshMaterial2d(materials.add(Color::srgb(1.0, 1.0, 0.0))), // Yellow
-                    Transform::from_xyz(collision_point.x, collision_point.y, 1.0),
-                    CollisionVisualization {
-                        normal: collision_normal,
-                        position: collision_point,
-                        timer: 0.5, // Show for 0.5 seconds
-                        impulse_magnitude,
-                    },
-                ));
-
-                info!(
-                    "Collision detected between particles {} and {}",
-                    part_a.id, part_b.id
-                );
-                info!("  Collision normal: {:?}", collision_normal);
-                info!("  Collision point: {:?}", collision_point);
-                info!("  Impulse magnitude: {:.2}", impulse_magnitude);
-                info!("  Overlap: {:.2}", overlap);
-            }
-        }
-    }
-
-    // Spawn debug lines for collision normals
-    for debug_line in debug_lines {
-        spawn_debug_line(&mut commands, &mut meshes, &mut materials, debug_line);
-    }
-}
-
-// Function to create visual debug lines
-fn spawn_debug_line(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<ColorMaterial>>,
-    debug_line: DebugLine,
-) {
-    let direction = debug_line.end - debug_line.start;
-    let length = direction.length();
-    let angle = direction.y.atan2(direction.x);
-
-    let center = (debug_line.start + debug_line.end) / 2.0;
-
-    // Create a rectangle mesh for the line
-    let line_mesh = meshes.add(Rectangle::new(length, 2.0));
-
-    commands.spawn((
-        Mesh2d(line_mesh),
-        MeshMaterial2d(materials.add(debug_line.color)),
-        Transform::from_xyz(center.x, center.y, 0.5).with_rotation(Quat::from_rotation_z(angle)),
-        debug_line,
-    ));
-}
-
-// System to draw velocity vectors
-fn velocity_vector_system(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    query: Query<(&Position, &Velocity, &Particle)>,
-    debug_settings: Res<DebugSettings>,
-    // Clean up old velocity vectors
-    old_vectors: Query<Entity, (With<DebugLine>, Without<Particle>)>,
-) {
-    // Remove old velocity vectors
-    for entity in &old_vectors {
-        commands.entity(entity).despawn();
-    }
-
-    if !debug_settings.show_velocity_vectors {
-        return;
-    }
-
-    // Draw new velocity vectors
-    for (pos, vel, _particle) in &query {
-        if vel.0.length() > 1.0 {
-            // Only show if velocity is significant
-            let velocity_end = pos.0 + vel.0 * debug_settings.velocity_scale;
-
-            let debug_line = DebugLine {
-                start: pos.0,
-                end: velocity_end,
-                color: Color::srgb(0.0, 1.0, 0.0), // Green for velocity
-                line_type: DebugLineType::VelocityVector,
-            };
-
-            spawn_debug_line(&mut commands, &mut meshes, &mut materials, debug_line);
-        }
-    }
-}
-
-// System to clean up collision visualization markers
-fn collision_visualization_cleanup(
-    mut commands: Commands,
-    mut query: Query<(Entity, &mut CollisionVisualization)>,
-    time: Res<Time>,
-) {
-    for (entity, mut viz) in &mut query {
-        viz.timer -= time.delta_secs();
-        if viz.timer <= 0.0 {
-            commands.entity(entity).despawn();
         }
     }
 }
 
 // LEVEL 5: Sync rendering system
 fn sync_transform_system(mut query: Query<(&mut Transform, &Position), With<Particle>>) {
+    // Update Transform.translation from Position for rendering
     for (mut transform, position) in &mut query {
         transform.translation = position.0.extend(0.0);
     }
@@ -569,12 +336,14 @@ fn spawn_at_mouse_click(
                 let color = Color::srgb(random_c.r, random_c.g, random_c.b);
 
                 count.0 += 1;
+                info_once!("{}", count.0);
 
+                // LEVEL 2: Spawn with proper component structure
                 commands.spawn((
                     Mesh2d(shape),
                     MeshMaterial2d(materials.add(color)),
-                    Transform::from_xyz(world_x, world_y, 0.0),
-                    Position(Vec2::new(world_x, world_y)),
+                    Transform::from_xyz(world_x, world_y, 0.0), // Keep for rendering
+                    Position(Vec2::new(world_x, world_y)),      // Position component
                     Velocity(Vec2::new(
                         rand::rng().random_range(-300.0..300.0),
                         rand::rng().random_range(-100.0..300.0),
@@ -582,14 +351,12 @@ fn spawn_at_mouse_click(
                     Particle {
                         radius: 7.0,
                         mass: 20.0,
-                        id: count.0 as u32,
                     },
                 ));
             }
         }
     }
 }
-
 fn text_update_system(
     diagnostics: Res<DiagnosticsStore>,
     mut query: Query<&mut TextSpan, With<FpsText>>,
@@ -597,12 +364,13 @@ fn text_update_system(
     for mut span in &mut query {
         if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
             if let Some(value) = fps.smoothed() {
+                // Update the value of the second section
                 **span = format!("{value:.2}");
+                info_once!("{}", **span);
             }
         }
     }
 }
-
 fn ball_count_update(count: Res<BallCount>, mut ball: Query<&mut TextSpan, With<BallText>>) {
     if count.is_changed() {
         for mut span in &mut ball {
@@ -617,28 +385,21 @@ fn main() {
     app.add_plugins(DefaultPlugins);
     app.add_plugins(FrameTimeDiagnosticsPlugin::default());
     app.add_systems(Startup, startup);
-
-    // Initialize resources
     app.insert_resource(BallCount(1));
-    app.insert_resource(DebugSettings::default());
-    app.insert_resource(PhysicsPaused::default());
 
-    // Physics systems (only run when not paused)
+    // Add systems in the correct order for physics simulation
     app.add_systems(
         Update,
         (
-            debug_input_system,
             physics_system,
             gravity_system,
             wall_collision_system,
             particle_collision_system,
-            velocity_vector_system,
-            collision_visualization_cleanup,
             sync_transform_system,
             text_update_system,
         )
             .chain(),
-    );
+    ); // .chain() ensures they run in order
 
     app.add_systems(Update, (spawn_at_mouse_click, ball_count_update).chain());
 
